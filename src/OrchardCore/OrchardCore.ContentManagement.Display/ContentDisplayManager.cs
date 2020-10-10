@@ -2,19 +2,18 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using OrchardCore.Modules;
 using Microsoft.Extensions.Logging;
 using OrchardCore.ContentManagement.Display.ContentDisplay;
 using OrchardCore.ContentManagement.Handlers;
-using OrchardCore.ContentManagement.Metadata.Settings;
 using OrchardCore.ContentManagement.Metadata;
+using OrchardCore.ContentManagement.Metadata.Settings;
 using OrchardCore.DisplayManagement;
 using OrchardCore.DisplayManagement.Descriptors;
 using OrchardCore.DisplayManagement.Handlers;
 using OrchardCore.DisplayManagement.Layout;
 using OrchardCore.DisplayManagement.ModelBinding;
 using OrchardCore.DisplayManagement.Shapes;
-using OrchardCore.DisplayManagement.Theming;
+using OrchardCore.Modules;
 
 namespace OrchardCore.ContentManagement.Display
 {
@@ -31,8 +30,8 @@ namespace OrchardCore.ContentManagement.Display
         private readonly IShapeTableManager _shapeTableManager;
         private readonly IContentDefinitionManager _contentDefinitionManager;
         private readonly IShapeFactory _shapeFactory;
-        private readonly IThemeManager _themeManager;
         private readonly ILayoutAccessor _layoutAccessor;
+        private readonly ILogger _logger;
 
         public ContentItemDisplayManager(
             IEnumerable<IContentDisplayHandler> handlers,
@@ -40,23 +39,19 @@ namespace OrchardCore.ContentManagement.Display
             IShapeTableManager shapeTableManager,
             IContentDefinitionManager contentDefinitionManager,
             IShapeFactory shapeFactory,
-            IThemeManager themeManager,
+            IEnumerable<IShapePlacementProvider> placementProviders,
             ILogger<ContentItemDisplayManager> logger,
             ILayoutAccessor layoutAccessor
-            ) : base(shapeTableManager, shapeFactory, themeManager)
+            ) : base(shapeFactory, placementProviders)
         {
             _handlers = handlers;
             _contentHandlers = contentHandlers;
             _shapeTableManager = shapeTableManager;
             _contentDefinitionManager = contentDefinitionManager;
             _shapeFactory = shapeFactory;
-            _themeManager = themeManager;
             _layoutAccessor = layoutAccessor;
-
-            Logger = logger;
+            _logger = logger;
         }
-
-        ILogger Logger { get; set; }
 
         public async Task<IShape> BuildDisplayAsync(ContentItem contentItem, IUpdateModel updater, string displayType, string groupId)
         {
@@ -67,7 +62,7 @@ namespace OrchardCore.ContentManagement.Display
 
             var contentTypeDefinition = _contentDefinitionManager.GetTypeDefinition(contentItem.ContentType);
 
-            var stereotype = contentTypeDefinition.Settings.ToObject<ContentTypeSettings>().Stereotype;
+            var stereotype = contentTypeDefinition.GetSettings<ContentTypeSettings>().Stereotype;
             var actualDisplayType = string.IsNullOrEmpty(displayType) ? "Detail" : displayType;
             var actualShapeType = stereotype ?? "Content";
 
@@ -79,6 +74,7 @@ namespace OrchardCore.ContentManagement.Display
 
             dynamic itemShape = await CreateContentShapeAsync(actualShapeType);
             itemShape.ContentItem = contentItem;
+            itemShape.Stereotype = stereotype;
 
             ShapeMetadata metadata = itemShape.Metadata;
             metadata.DisplayType = actualDisplayType;
@@ -97,7 +93,7 @@ namespace OrchardCore.ContentManagement.Display
 
             await BindPlacementAsync(context);
 
-            await _handlers.InvokeAsync(async handler => await handler.BuildDisplayAsync(contentItem, context), Logger);
+            await _handlers.InvokeAsync((handler, contentItem, context) => handler.BuildDisplayAsync(contentItem, context), contentItem, context, _logger);
 
             return context.Shape;
         }
@@ -111,12 +107,13 @@ namespace OrchardCore.ContentManagement.Display
 
             var contentTypeDefinition = _contentDefinitionManager.GetTypeDefinition(contentItem.ContentType);
 
-            var stereotype = contentTypeDefinition.Settings.ToObject<ContentTypeSettings>().Stereotype;
+            var stereotype = contentTypeDefinition.GetSettings<ContentTypeSettings>().Stereotype;
 
             var actualShapeType = (stereotype ?? "Content") + "_Edit";
 
             dynamic itemShape = await CreateContentShapeAsync(actualShapeType);
             itemShape.ContentItem = contentItem;
+            itemShape.Stereotype = stereotype;
 
             // adding an alternate for [Stereotype]_Edit__[ContentType] e.g. Content-Menu.Edit
             ((IShape)itemShape).Metadata.Alternates.Add(actualShapeType + "__" + contentItem.ContentType);
@@ -133,7 +130,7 @@ namespace OrchardCore.ContentManagement.Display
 
             await BindPlacementAsync(context);
 
-            await _handlers.InvokeAsync(async handler => await handler.BuildEditorAsync(contentItem, context), Logger);
+            await _handlers.InvokeAsync((handler, contentItem, context) => handler.BuildEditorAsync(contentItem, context), contentItem, context, _logger);
 
             return context.Shape;
         }
@@ -145,12 +142,13 @@ namespace OrchardCore.ContentManagement.Display
                 throw new ArgumentNullException(nameof(contentItem));
             }
 
-            var contentTypeDefinition = _contentDefinitionManager.GetTypeDefinition(contentItem.ContentType);
-            var stereotype = contentTypeDefinition.Settings.ToObject<ContentTypeSettings>().Stereotype;
+            var contentTypeDefinition = _contentDefinitionManager.LoadTypeDefinition(contentItem.ContentType);
+            var stereotype = contentTypeDefinition.GetSettings<ContentTypeSettings>().Stereotype;
             var actualShapeType = (stereotype ?? "Content") + "_Edit";
 
             dynamic itemShape = await CreateContentShapeAsync(actualShapeType);
             itemShape.ContentItem = contentItem;
+            itemShape.Stereotype = stereotype;
 
             // adding an alternate for [Stereotype]_Edit__[ContentType] e.g. Content-Menu.Edit
             ((IShape)itemShape).Metadata.Alternates.Add(actualShapeType + "__" + contentItem.ContentType);
@@ -167,11 +165,11 @@ namespace OrchardCore.ContentManagement.Display
 
             await BindPlacementAsync(context);
 
-            var updateContentContext = new UpdateContentContext(contentItem, updater);
+            var updateContentContext = new UpdateContentContext(contentItem);
 
-            await _contentHandlers.InvokeAsync(async handler => await handler.UpdatingAsync(updateContentContext), Logger);
-            await _handlers.InvokeAsync(async handler => await handler.UpdateEditorAsync(contentItem, context), Logger);
-            await _contentHandlers.Reverse().InvokeAsync(async handler => await handler.UpdatedAsync(updateContentContext), Logger);
+            await _contentHandlers.InvokeAsync((handler, updateContentContext) => handler.UpdatingAsync(updateContentContext), updateContentContext, _logger);
+            await _handlers.InvokeAsync((handler, contentItem, context) => handler.UpdateEditorAsync(contentItem, context), contentItem, context, _logger);
+            await _contentHandlers.Reverse().InvokeAsync((handler, updateContentContext) => handler.UpdatedAsync(updateContentContext), updateContentContext, _logger);
 
             return context.Shape;
         }
